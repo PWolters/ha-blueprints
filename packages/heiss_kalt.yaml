@@ -1,0 +1,130 @@
+# packages/heiss_kalt.yaml
+# Helfer und Verstecken-Logik für den Blueprint "Heiß & Kalt – Suchspiel"
+# Voraussetzung in configuration.yaml:
+#   homeassistant:
+#     packages: !include_dir_named packages
+
+input_boolean:
+  heiss_kalt_aktiv:
+    name: Heiß & Kalt – Spiel läuft
+    icon: mdi:fire
+
+input_number:
+  heiss_kalt_letzte_distanz:
+    name: Heiß & Kalt – letzte Entfernung
+    icon: mdi:map-marker-distance
+    min: 0
+    max: 100000
+    step: 1
+    mode: box
+    unit_of_measurement: m
+
+  # Koordinaten des versteckten Schatzes (0/0 = nichts versteckt)
+  heiss_kalt_schatz_lat:
+    name: Heiß & Kalt – Schatz Breitengrad
+    icon: mdi:latitude
+    min: -90
+    max: 90
+    step: 0.000001
+    mode: box
+  heiss_kalt_schatz_lon:
+    name: Heiß & Kalt – Schatz Längengrad
+    icon: mdi:longitude
+    min: -180
+    max: 180
+    step: 0.000001
+    mode: box
+
+input_button:
+  heiss_kalt_schatz_verstecken:
+    name: Schatz hier verstecken
+    icon: mdi:treasure-chest
+
+automation:
+  - id: heiss_kalt_schatz_verstecken
+    alias: Heiß & Kalt – Schatz verstecken
+    description: >
+      Speichert die aktuelle GPS-Position der Person, die den Knopf
+      "Schatz hier verstecken" in der App gedrückt hat.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: input_button.heiss_kalt_schatz_verstecken
+    variables:
+      uid: "{{ trigger.to_state.context.user_id }}"
+      verstecker: >-
+        {{ states.person
+           | selectattr('attributes.user_id', 'eq', uid)
+           | map(attribute='entity_id') | first | default('') }}
+      tracker: "{{ (state_attr(verstecker, 'source') or '') if verstecker else '' }}"
+      # Annahme: device_tracker.<name> gehört zu notify.mobile_app_<name>
+      # (Standard bei der Companion App)
+      verstecker_notify: >-
+        {{ 'notify.mobile_app_' ~ tracker.split('.')[1] if tracker.startswith('device_tracker.') else '' }}
+    actions:
+      - if:
+          - condition: template
+            value_template: "{{ verstecker == '' }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              title: Heiß & Kalt
+              message: >
+                Schatz konnte nicht versteckt werden: Der Knopf wurde nicht von
+                einem Benutzer mit zugeordneter Person gedrückt.
+          - stop: Keine Person zum Benutzer gefunden
+
+      # Frische Position vom Handy des Versteckers anfordern
+      - if:
+          - condition: template
+            value_template: "{{ verstecker_notify != '' }}"
+        then:
+          - action: "{{ verstecker_notify }}"
+            continue_on_error: true
+            data:
+              message: request_location_update
+          - delay:
+              seconds: 10
+
+      - variables:
+          lat: "{{ state_attr(verstecker, 'latitude') }}"
+          lon: "{{ state_attr(verstecker, 'longitude') }}"
+          genauigkeit: "{{ state_attr(verstecker, 'gps_accuracy') | int(0) }}"
+
+      - if:
+          - condition: template
+            value_template: "{{ lat is not number or lon is not number }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              title: Heiß & Kalt
+              message: "Keine GPS-Position für {{ state_attr(verstecker, 'friendly_name') }} verfügbar."
+          - stop: Keine Koordinaten
+
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.heiss_kalt_aktiv
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.heiss_kalt_schatz_lat
+        data:
+          value: "{{ lat }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.heiss_kalt_schatz_lon
+        data:
+          value: "{{ lon }}"
+
+      - if:
+          - condition: template
+            value_template: "{{ verstecker_notify != '' }}"
+        then:
+          - action: "{{ verstecker_notify }}"
+            continue_on_error: true
+            data:
+              title: 🪙 Schatz versteckt
+              message: >-
+                Position gespeichert{{ ' (Genauigkeit ±' ~ genauigkeit ~ ' m)' if genauigkeit > 0 else '' }}.
+                {{- ' Achtung: ungenaues GPS, besser kurz warten und nochmal drücken.' if genauigkeit > 30 else '' }}
+                Jetzt "Spiel läuft" einschalten!

@@ -1,0 +1,139 @@
+blueprint:
+  name: Nähe-Alarm zwischen zwei Entitäten
+  description: >
+    Benachrichtigt, wenn sich zwei Personen oder Tracker näher kommen als X Meter.
+    Keine Benachrichtigung, wenn eine der beiden zuhause ist.
+    Versand per Push (Companion App) und/oder optional per WhatsApp
+    (Custom-Integration FaserF/ha-whatsapp).
+  domain: automation
+  source_url: https://github.com/PWolters/ha-blueprints/blob/main/blueprints/automation/naehe_alarm.yaml
+  input:
+    entity_a:
+      name: Entität A
+      selector:
+        entity:
+          domain: [person, device_tracker]
+    entity_b:
+      name: Entität B
+      selector:
+        entity:
+          domain: [person, device_tracker]
+    schwelle:
+      name: Abstand (Meter)
+      default: 200
+      selector:
+        number:
+          min: 20
+          max: 10000
+          step: 10
+          unit_of_measurement: m
+          mode: box
+    cooldown:
+      name: Sperrzeit nach Benachrichtigung (Minuten)
+      description: Verhindert Mehrfachmeldungen durch GPS-Springen um die Schwelle.
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 720
+          unit_of_measurement: min
+          mode: box
+
+    push_section:
+      name: Push-Benachrichtigung
+      collapsed: false
+      input:
+        push_aktiv:
+          name: Push senden
+          default: true
+          selector:
+            boolean:
+        notify_service:
+          name: Notify-Dienst
+          description: z. B. notify.mobile_app_mein_handy
+          default: ""
+          selector:
+            text:
+
+    whatsapp_section:
+      name: WhatsApp (optional, benötigt FaserF/ha-whatsapp)
+      collapsed: true
+      input:
+        whatsapp_aktiv:
+          name: WhatsApp senden
+          default: false
+          selector:
+            boolean:
+        whatsapp_targets:
+          name: WhatsApp-Empfänger
+          description: >
+            Eine oder mehrere Nummern im internationalen Format (z. B. +4917612345678)
+            oder Gruppen-IDs, jeweils mit Enter bestätigen.
+          default: []
+          selector:
+            text:
+              multiple: true
+
+mode: single
+max_exceeded: silent
+
+trigger_variables:
+  a: !input entity_a
+  b: !input entity_b
+  schwelle: !input schwelle
+
+variables:
+  cooldown: !input cooldown
+  push_aktiv: !input push_aktiv
+  notify_service: !input notify_service
+  whatsapp_aktiv: !input whatsapp_aktiv
+  whatsapp_targets: !input whatsapp_targets
+  nachricht: >
+    {{ state_attr(a, 'friendly_name') or a }} und
+    {{ state_attr(b, 'friendly_name') or b }} sind nur noch
+    {{ (distance(a, b) * 1000) | round(0) | int }} m voneinander entfernt.
+
+triggers:
+  # Feuert nur beim Übergang "weiter weg" -> "näher als Schwelle".
+  # distance() liefert bei metrischem Einheitensystem Kilometer.
+  - trigger: template
+    value_template: >
+      {% set d = distance(a, b) %}
+      {{ d is number and (d * 1000) < (schwelle | float) }}
+
+conditions:
+  # Keine Meldung, wenn eine der beiden Entitäten zuhause ist.
+  # Da hier nur geprüft (nicht getriggert) wird, gibt es auch keine Meldung,
+  # wenn beide gemeinsam das Haus verlassen.
+  - condition: template
+    value_template: "{{ not is_state(a, 'home') and not is_state(b, 'home') }}"
+
+actions:
+  - parallel:
+      # Push über Companion App
+      - if:
+          - condition: template
+            value_template: "{{ push_aktiv and notify_service | trim != '' }}"
+        then:
+          - action: "{{ notify_service | trim }}"
+            continue_on_error: true
+            data:
+              title: Nähe-Alarm
+              message: "{{ nachricht }}"
+
+      # WhatsApp über FaserF ha-whatsapp, ein Aufruf pro Empfänger
+      - if:
+          - condition: template
+            value_template: "{{ whatsapp_aktiv and whatsapp_targets | count > 0 }}"
+        then:
+          - repeat:
+              for_each: "{{ whatsapp_targets }}"
+              sequence:
+                - action: whatsapp.send_message
+                  continue_on_error: true
+                  data:
+                    target: "{{ repeat.item }}"
+                    message: "📍 Nähe-Alarm: {{ nachricht }}"
+
+  - delay:
+      minutes: "{{ cooldown | int }}"

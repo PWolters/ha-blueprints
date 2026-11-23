@@ -1,0 +1,350 @@
+blueprint:
+  name: Heiß & Kalt – Suchspiel
+  description: >
+    Kinderspiel "Heiß und kalt" per GPS: Ein Sucher bekommt bei Bewegung
+    "Wärmer!" oder "Kälter!" samt Temperaturstufe, bis er das Ziel gefunden hat.
+    Ziel ist entweder ein versteckter Schatz (Knopf "Schatz hier verstecken")
+    oder eine Person, ein Tracker bzw. eine Zone.
+    Start: Schalter "Spiel läuft" einschalten ODER diese Automation ausführen
+    ("Ausführen" bzw. automation.trigger). Ausführen während eines laufenden
+    Spiels startet die Runde neu.
+    Benötigt die Helfer aus packages/heiss_kalt.yaml (siehe README).
+  domain: automation
+  source_url: https://github.com/PWolters/ha-blueprints/blob/main/blueprints/automation/heiss_kalt.yaml
+  input:
+    spiel_section:
+      name: Spiel
+      collapsed: false
+      input:
+        sucher:
+          name: Sucher
+          selector:
+            entity:
+              domain: [person, device_tracker]
+        modus:
+          name: Was wird gesucht?
+          default: schatz
+          selector:
+            select:
+              options:
+                - label: Versteckter Schatz
+                  value: schatz
+                - label: Person, Tracker oder Zone
+                  value: entitaet
+        ziel:
+          name: Ziel (nur bei "Person, Tracker oder Zone")
+          description: Wird im Schatz-Modus ignoriert.
+          default: zone.home
+          selector:
+            entity:
+              domain: [person, device_tracker, zone]
+        spiel_aktiv:
+          name: Schalter "Spiel läuft"
+          default: input_boolean.heiss_kalt_aktiv
+          selector:
+            entity:
+              domain: input_boolean
+        letzte_distanz:
+          name: Speicher letzte Entfernung
+          default: input_number.heiss_kalt_letzte_distanz
+          selector:
+            entity:
+              domain: input_number
+        schatz_lat:
+          name: Schatz Breitengrad
+          default: input_number.heiss_kalt_schatz_lat
+          selector:
+            entity:
+              domain: input_number
+        schatz_lon:
+          name: Schatz Längengrad
+          default: input_number.heiss_kalt_schatz_lon
+          selector:
+            entity:
+              domain: input_number
+
+    regeln_section:
+      name: Regeln
+      collapsed: true
+      input:
+        spielgroesse:
+          name: Spielfeldgröße (Meter)
+          description: >
+            Skaliert die Temperaturstufen. Ca. Startentfernung wählen
+            (Dorfrunde ~1000 m, Stadtteil ~3000 m).
+          default: 1000
+          selector:
+            number:
+              min: 100
+              max: 50000
+              step: 50
+              unit_of_measurement: m
+              mode: box
+        schritt:
+          name: Mindeständerung für neuen Hinweis (Meter)
+          description: Kleinere Änderungen werden ignoriert (GPS-Rauschen).
+          default: 25
+          selector:
+            number:
+              min: 5
+              max: 1000
+              unit_of_measurement: m
+              mode: box
+        fund_radius:
+          name: Gefunden ab (Meter)
+          default: 20
+          selector:
+            number:
+              min: 5
+              max: 500
+              unit_of_measurement: m
+              mode: box
+        standort_anfordern:
+          name: Standort des Suchers alle 30 s anfordern
+          description: >
+            Schickt "request_location_update" an die Companion App des Suchers
+            (Notify-Dienst unten). Unter iOS von Apple gedrosselt.
+          default: true
+          selector:
+            boolean:
+
+    push_section:
+      name: Push an den Sucher
+      collapsed: false
+      input:
+        push_aktiv:
+          name: Push senden
+          default: true
+          selector:
+            boolean:
+        notify_service:
+          name: Notify-Dienst des Suchers
+          description: z. B. notify.mobile_app_handy_des_kindes
+          selector:
+            text:
+
+    whatsapp_section:
+      name: WhatsApp (optional, benötigt FaserF/ha-whatsapp)
+      collapsed: true
+      input:
+        whatsapp_aktiv:
+          name: WhatsApp senden
+          default: false
+          selector:
+            boolean:
+        whatsapp_targets:
+          name: WhatsApp-Empfänger
+          description: Nummern (+49…) oder Gruppen-IDs, jeweils mit Enter bestätigen.
+          default: []
+          selector:
+            text:
+              multiple: true
+
+# queued statt single: Beim Ausführen schaltet die Automation den Spielschalter
+# ein; der dadurch ausgelöste Start-Lauf muss danach noch abgearbeitet werden.
+mode: queued
+max: 5
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input spiel_aktiv
+    to: "on"
+    id: start
+  # Ohne "to:" löst der Trigger auch bei reinen Attributänderungen (GPS) aus.
+  - trigger: state
+    entity_id: !input sucher
+    id: bewegung
+  - trigger: state
+    entity_id: !input ziel
+    id: bewegung
+  - trigger: time_pattern
+    seconds: "/30"
+    id: anfordern
+
+variables:
+  sucher: !input sucher
+  modus: !input modus
+  ziel: !input ziel
+  spiel_aktiv: !input spiel_aktiv
+  letzte_distanz: !input letzte_distanz
+  schatz_lat: !input schatz_lat
+  schatz_lon: !input schatz_lon
+  spielgroesse: !input spielgroesse
+  schritt: !input schritt
+  fund_radius: !input fund_radius
+  standort_anfordern: !input standort_anfordern
+  push_aktiv: !input push_aktiv
+  notify_service: !input notify_service
+  whatsapp_aktiv: !input whatsapp_aktiv
+  whatsapp_targets: !input whatsapp_targets
+
+  # Beim manuellen Ausführen gibt es keine Trigger-ID
+  tid: >-
+    {{ trigger.id if (trigger is defined and trigger.id is defined and trigger.id) else 'manuell' }}
+
+  ziel_name: >-
+    {{ 'den Schatz' if modus == 'schatz' else (state_attr(ziel, 'friendly_name') or ziel) }}
+
+  s_lat: "{{ state_attr(sucher, 'latitude') }}"
+  s_lon: "{{ state_attr(sucher, 'longitude') }}"
+  z_lat: >-
+    {{ states(schatz_lat) | float(0) if modus == 'schatz' else state_attr(ziel, 'latitude') }}
+  z_lon: >-
+    {{ states(schatz_lon) | float(0) if modus == 'schatz' else state_attr(ziel, 'longitude') }}
+  ziel_gueltig: >-
+    {{ z_lat is number and z_lon is number and not (z_lat == 0 and z_lon == 0) }}
+
+  d: >-
+    {%- if ziel_gueltig and s_lat is number and s_lon is number -%}
+      {{ (distance(s_lat, s_lon, z_lat, z_lon) * 1000) | round(0) | int }}
+    {%- else -%}-1{%- endif -%}
+  letzte: "{{ states(letzte_distanz) | float(-1) }}"
+  diff: "{{ (d - letzte) if letzte >= 0 else 0 }}"
+
+  stufe: >-
+    {%- set r = d / (spielgroesse | float) -%}
+    {%- if r < 0.05 -%}🔥🔥 Glühend heiß
+    {%- elif r < 0.15 -%}🔥 Heiß
+    {%- elif r < 0.4 -%}☀️ Warm
+    {%- elif r < 1.0 -%}🌤️ Lauwarm
+    {%- elif r < 3.0 -%}❄️ Kalt
+    {%- else -%}🧊 Eiskalt
+    {%- endif -%}
+
+  ereignis: >-
+    {%- if tid == 'manuell' -%}
+      {%- if is_state(spiel_aktiv, 'on') -%}{{ 'neustart' if d >= 0 else 'kein_ziel' }}
+      {%- else -%}einschalten
+      {%- endif -%}
+    {%- elif tid == 'start' -%}{{ 'start' if d >= 0 else 'kein_ziel' }}
+    {%- elif tid == 'anfordern' -%}anfordern
+    {%- elif d < 0 -%}keine
+    {%- elif d <= (fund_radius | float) -%}gefunden
+    {%- elif letzte < 0 -%}keine
+    {%- elif (diff | abs) >= (schritt | float) -%}update
+    {%- else -%}keine
+    {%- endif -%}
+
+  nachricht: >-
+    {%- if ereignis == 'start' -%}
+      Los geht's! Finde {{ ziel_name }}. Gerade bist du: {{ stufe }}
+    {%- elif ereignis == 'neustart' -%}
+      🔄 Neue Runde! Finde {{ ziel_name }}. Gerade bist du: {{ stufe }}
+    {%- elif ereignis == 'kein_ziel' -%}
+      {%- if not ziel_gueltig and modus == 'schatz' -%}
+        Es ist noch kein Schatz versteckt. Erst "Schatz hier verstecken" drücken!
+      {%- else -%}
+        Spiel kann nicht starten: Keine GPS-Position für Sucher oder Ziel.
+      {%- endif -%}
+    {%- elif ereignis == 'gefunden' -%}
+      🎉 Gefunden! Du hast {{ ziel_name }} erwischt!
+    {%- elif ereignis == 'update' -%}
+      {{ 'Wärmer!' if diff < 0 else 'Kälter!' }} {{ stufe }}
+    {%- endif -%}
+
+# Hinweis: Beim "Ausführen" aus der UI werden diese Bedingungen übersprungen;
+# die Aktionen behandeln den manuellen Start selbst.
+conditions:
+  - condition: template
+    value_template: "{{ is_state(spiel_aktiv, 'on') or ereignis == 'einschalten' }}"
+  - condition: template
+    value_template: >-
+      {{ ereignis in ['einschalten', 'start', 'neustart', 'kein_ziel', 'gefunden', 'update']
+         or (ereignis == 'anfordern' and standort_anfordern) }}
+
+actions:
+  - choose:
+      # Manuell ausgeführt, Spiel lief noch nicht: Schalter einschalten.
+      # Der Start-Trigger übernimmt dann im nächsten (gequeueten) Lauf.
+      - conditions:
+          - condition: template
+            value_template: "{{ ereignis == 'einschalten' }}"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ spiel_aktiv }}"
+          - stop: Spiel eingeschaltet
+
+      # Standort-Update beim Handy des Suchers anfordern (keine sichtbare Meldung)
+      - conditions:
+          - condition: template
+            value_template: "{{ ereignis == 'anfordern' }}"
+        sequence:
+          - action: "{{ notify_service | trim }}"
+            continue_on_error: true
+            data:
+              message: request_location_update
+          - stop: Standort angefordert
+
+      # Spielstart oder Neustart: Ausgangsentfernung merken
+      - conditions:
+          - condition: template
+            value_template: "{{ ereignis in ['start', 'neustart'] }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: "{{ letzte_distanz }}"
+            data:
+              value: "{{ d }}"
+
+      # Start ohne gültiges Ziel: Spiel gleich wieder ausschalten
+      - conditions:
+          - condition: template
+            value_template: "{{ ereignis == 'kein_ziel' }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ spiel_aktiv }}"
+
+      # Neuer Hinweis: Entfernung merken
+      - conditions:
+          - condition: template
+            value_template: "{{ ereignis == 'update' }}"
+        sequence:
+          - action: input_number.set_value
+            target:
+              entity_id: "{{ letzte_distanz }}"
+            data:
+              value: "{{ d }}"
+
+      # Gefunden: Spiel beenden
+      - conditions:
+          - condition: template
+            value_template: "{{ ereignis == 'gefunden' }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ spiel_aktiv }}"
+
+  # Sicherheitsnetz: ohne Nachrichtentext nichts senden
+  - condition: template
+    value_template: "{{ nachricht | trim != '' }}"
+
+  - parallel:
+      - if:
+          - condition: template
+            value_template: "{{ push_aktiv }}"
+        then:
+          - action: "{{ notify_service | trim }}"
+            continue_on_error: true
+            data:
+              title: Heiß & Kalt
+              message: "{{ nachricht }}"
+              data:
+                # Nur iOS; Android ignoriert den Eintrag
+                push:
+                  interruption-level: time-sensitive
+
+      - if:
+          - condition: template
+            value_template: "{{ whatsapp_aktiv and whatsapp_targets | count > 0 }}"
+        then:
+          - repeat:
+              for_each: "{{ whatsapp_targets }}"
+              sequence:
+                - action: whatsapp.send_message
+                  continue_on_error: true
+                  data:
+                    target: "{{ repeat.item }}"
+                    message: "🎯 Heiß & Kalt: {{ nachricht }}"

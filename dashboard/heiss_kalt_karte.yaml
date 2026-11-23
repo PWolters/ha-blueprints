@@ -1,0 +1,97 @@
+# Dashboard-Karte "Heiß & Kalt"
+# Nur Core-Karten, keine HACS-Abhängigkeiten.
+# Anpassen: automation.heiss_kalt_suchspiel -> Entity-ID deiner Heiß-&-Kalt-Automation (2x)
+type: vertical-stack
+cards:
+  - type: heading
+    heading: 🎯 Heiß & Kalt
+    heading_style: title
+    badges:
+      - type: entity
+        entity: input_boolean.heiss_kalt_aktiv
+        show_state: true
+        show_icon: true
+        color: deep-orange
+        visibility:
+          - condition: state
+            entity: input_boolean.heiss_kalt_aktiv
+            state: "on"
+
+  - type: markdown
+    text_only: true
+    content: >-
+      {%- set aktiv = is_state('input_boolean.heiss_kalt_aktiv', 'on') -%}
+      {%- set lat = states.input_number.heiss_kalt_schatz_lat -%}
+      {%- set versteckt = lat is not none and (lat.state | float(0)) != 0 -%}
+      {%- if aktiv -%}
+      ### 🔎 Die Suche läuft!
+      Achte auf die Hinweise: wärmer oder kälter?
+      {%- elif versteckt -%}
+      ### 🪙 Der Schatz ist versteckt
+      Versteckt {{ relative_time(lat.last_changed) }} — bereit zum Start.
+      {%- else -%}
+      ### 🗺️ Noch kein Schatz versteckt
+      Geh zum Versteck und drück **Schatz verstecken**.
+      {%- endif -%}
+
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: tile
+        entity: input_button.heiss_kalt_schatz_verstecken
+        name: Schatz verstecken
+        icon: mdi:treasure-chest
+        color: amber
+        vertical: true
+        hide_state: true
+        tap_action:
+          action: perform-action
+          perform_action: input_button.press
+          target:
+            entity_id: input_button.heiss_kalt_schatz_verstecken
+          confirmation:
+            text: >-
+              Schatz genau hier verstecken? Ein laufendes Spiel wird dabei beendet.
+        hold_action:
+          action: none
+
+      - type: tile
+        entity: automation.heiss_kalt_suchspiel
+        name: Spiel starten
+        icon: mdi:flag-checkered
+        color: green
+        vertical: true
+        hide_state: true
+        tap_action:
+          action: perform-action
+          perform_action: automation.trigger
+          target:
+            entity_id: automation.heiss_kalt_suchspiel
+          data:
+            skip_condition: true
+          confirmation:
+            text: >-
+              Spiel starten? Läuft schon eine Runde, wird sie neu gestartet.
+        hold_action:
+          action: none
+
+  - type: tile
+    entity: input_boolean.heiss_kalt_aktiv
+    name: Spiel beenden
+    icon: mdi:stop-circle-outline
+    color: red
+    hide_state: true
+    tap_action:
+      action: perform-action
+      perform_action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.heiss_kalt_aktiv
+      confirmation:
+        text: Spiel wirklich beenden?
+    hold_action:
+      action: none
+    visibility:
+      - condition: state
+        entity: input_boolean.heiss_kalt_aktiv
+        state: "on"
